@@ -1,0 +1,141 @@
+# Dominions 6 - Auto Save Backup Watcher
+# Watches ALL game folders for .trn changes and creates numbered backup copies.
+# Usage: python dom6_backup.py
+# Requirements: pip install watchdog
+
+import shutil
+import time
+import os
+import sys
+import atexit
+import subprocess
+from pathlib import Path
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+SAVEDGAMES_PATH = Path(os.environ["APPDATA"]) / "Dominions6" / "savedgames"
+EXCLUDE_EXTENSIONS = {".d6m", ".map"}
+BACKUP_DELAY = 10
+COOLDOWN = 3
+LOCK_FILE = SAVEDGAMES_PATH / "dom6_backup.lock"
+
+
+def is_pid_running(pid):
+    result = subprocess.run(
+        ["tasklist", "/FI", "PID eq " + str(pid)],
+        capture_output=True, text=True
+    )
+    return str(pid) in result.stdout
+
+
+def acquire_lock():
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            if is_pid_running(pid):
+                print("Watcher already running (PID " + str(pid) + "). Exiting.")
+                sys.exit(0)
+            else:
+                print("Stale lock file found. Overwriting.")
+        except ValueError:
+            print("Invalid lock file. Overwriting.")
+    LOCK_FILE.write_text(str(os.getpid()))
+    atexit.register(release_lock)
+
+
+def release_lock():
+    if LOCK_FILE.exists():
+        LOCK_FILE.unlink()
+
+
+def get_next_backup_number(backup_dir, game_name):
+    existing = [
+        d for d in backup_dir.iterdir()
+        if d.is_dir() and d.name.startswith(game_name + "_")
+    ]
+    numbers = []
+    for d in existing:
+        suffix = d.name[len(game_name) + 1:]
+        if suffix.isdigit():
+            numbers.append(int(suffix))
+    return max(numbers, default=0) + 1
+
+
+def copy_ignore(directory, contents):
+    return [f for f in contents if Path(f).suffix in EXCLUDE_EXTENSIONS]
+
+
+def make_backup(game_dir, game_name):
+    backup_dir = SAVEDGAMES_PATH
+    n = get_next_backup_number(backup_dir, game_name)
+    dest = backup_dir / (game_name + "_" + str(n))
+    shutil.copytree(game_dir, dest, ignore=copy_ignore)
+    print("[" + time.strftime("%H:%M:%S") + "] Backup created: " + dest.name)
+
+
+class SaveWatcher(FileSystemEventHandler):
+    def __init__(self):
+        self._last_trigger = {}
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        changed = Path(event.src_path)
+        if changed.suffix != ".trn":
+            return
+
+        try:
+            rel = changed.relative_to(SAVEDGAMES_PATH)
+        except ValueError:
+            return
+
+        game_name = rel.parts[0]
+
+        parts = game_name.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            return
+
+        now = time.time()
+        last = self._last_trigger.get(game_name, 0)
+        if now - last < COOLDOWN:
+            return
+
+        self._last_trigger[game_name] = now
+        print("[" + time.strftime("%H:%M:%S") + "] Change detected in: " + game_name + " -- waiting " + str(BACKUP_DELAY) + "s before backup...")
+        time.sleep(BACKUP_DELAY)
+        self._last_trigger[game_name] = time.time()
+
+        game_dir = SAVEDGAMES_PATH / game_name
+        try:
+            make_backup(game_dir, game_name)
+        except Exception as e:
+            print("  ERROR during backup: " + str(e))
+
+
+def main():
+    if not SAVEDGAMES_PATH.exists():
+        print("ERROR: savedgames folder not found: " + str(SAVEDGAMES_PATH))
+        sys.exit(1)
+
+    acquire_lock()
+
+    print("Watching all games in: " + str(SAVEDGAMES_PATH))
+    print("Backups saved to same directory as: [gamename]_N")
+    print("Delay: " + str(BACKUP_DELAY) + "s after trigger")
+    print("Press Ctrl+C to stop.\n")
+
+    handler = SaveWatcher()
+    observer = Observer()
+    observer.schedule(handler, str(SAVEDGAMES_PATH), recursive=True)
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping watcher.")
+        observer.stop()
+    observer.join()
+
+
+if __name__ == "__main__":
+    main()
