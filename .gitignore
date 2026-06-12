@@ -1,0 +1,4 @@
+dom6_config.txt
+*.log
+*.bkp
+__pycache__/

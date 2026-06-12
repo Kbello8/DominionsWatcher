@@ -40,6 +40,7 @@ import atexit
 import hashlib
 import threading
 import subprocess
+import traceback
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -56,6 +57,23 @@ BACKUP_DELAY = 10
 CONTAINER_MARKER = ".dom6bak_container"
 
 LOCK_FILE = SAVEDGAMES_PATH / "dom6_backup.lock"
+LOG_FILE = SAVEDGAMES_PATH / "dom6_backup.log"
+
+# --follow-game mode: poll for the game process and exit when it's gone.
+GAME_EXE = "Dominions6.exe"
+GAME_POLL_SECONDS = 15
+GAME_STARTUP_GRACE = 60  # don't exit before the game has had time to launch
+
+
+def log(msg):
+    # stdout is invisible under pythonw, so mirror everything to a log file.
+    line = "[" + time.strftime("%Y-%m-%d %H:%M:%S") + "] " + msg
+    print(line)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def is_pid_running(pid):
@@ -66,17 +84,25 @@ def is_pid_running(pid):
     return str(pid) in result.stdout
 
 
+def is_game_running():
+    result = subprocess.run(
+        ["tasklist", "/FI", "IMAGENAME eq " + GAME_EXE],
+        capture_output=True, text=True
+    )
+    return GAME_EXE.lower() in result.stdout.lower()
+
+
 def acquire_lock():
     if LOCK_FILE.exists():
         try:
             pid = int(LOCK_FILE.read_text().strip())
             if is_pid_running(pid):
-                print("Watcher already running (PID " + str(pid) + "). Exiting.")
+                log("Watcher already running (PID " + str(pid) + "). Exiting.")
                 sys.exit(0)
             else:
-                print("Stale lock file found. Overwriting.")
+                log("Stale lock file found. Overwriting.")
         except ValueError:
-            print("Invalid lock file. Overwriting.")
+            log("Invalid lock file. Overwriting.")
     LOCK_FILE.write_text(str(os.getpid()))
     atexit.register(release_lock)
 
@@ -166,8 +192,8 @@ class SaveWatcher(FileSystemEventHandler):
             timer = threading.Timer(BACKUP_DELAY, self._do_backup, args=(game_name,))
             self._timers[game_name] = timer
             timer.start()
-        print("[" + time.strftime("%H:%M:%S") + "] Orders changed in '" + game_name +
-              "' -- backup in " + str(BACKUP_DELAY) + "s...")
+        log("Orders changed in '" + game_name +
+            "' -- backup in " + str(BACKUP_DELAY) + "s...")
 
     def _do_backup(self, game_name):
         with self._lock:
@@ -179,14 +205,14 @@ class SaveWatcher(FileSystemEventHandler):
 
         fp = trn_fingerprint(game_dir)
         if fp is None:
-            print("[" + time.strftime("%H:%M:%S") + "] '" + game_name +
-                  "' no .trn found -- skipping.")
+            log("'" + game_name + "' no .trn found -- skipping.")
             return
 
         try:
             self._make_backup(game_dir, game_name, fp)
-        except Exception as e:
-            print("  ERROR during backup: " + str(e))
+        except Exception:
+            log("ERROR during backup of '" + game_name + "':\n" +
+                traceback.format_exc())
 
     def _make_backup(self, game_dir, game_name, fp):
         container = SAVEDGAMES_PATH / (game_name + "_backups")
@@ -211,16 +237,22 @@ class SaveWatcher(FileSystemEventHandler):
 
         dest = container / (game_name + "_" + str(turn_num).zfill(3))
 
-        if is_overwrite and dest.exists():
+        # Copy to a temp folder first, then swap into place. A failed copy can't
+        # leave a partial dest behind (which would make every later copytree of
+        # this turn raise FileExistsError).
+        tmp_dest = container / (dest.name + ".tmp")
+        if tmp_dest.exists():
+            shutil.rmtree(tmp_dest)
+        shutil.copytree(game_dir, tmp_dest, ignore=copy_ignore)
+        if dest.exists():
             shutil.rmtree(dest)
-        shutil.copytree(game_dir, dest, ignore=copy_ignore)
+        tmp_dest.rename(dest)
 
         # Persist updated index only after the copy succeeds
         save_index(index_file, index)
 
         action = "overwritten (same turn)" if is_overwrite else "created (new turn)"
-        print("[" + time.strftime("%H:%M:%S") + "] Backup " + action +
-              ": " + dest.name + "  [" + game_name + "_backups]")
+        log("Backup " + action + ": " + dest.name + "  [" + game_name + "_backups]")
 
     def cancel_all(self):
         with self._lock:
@@ -228,28 +260,54 @@ class SaveWatcher(FileSystemEventHandler):
                 t.cancel()
             self._timers.clear()
 
+    def flush_all(self):
+        # Run any pending backups NOW instead of discarding them, so the last
+        # order save before shutdown isn't lost.
+        with self._lock:
+            pending = list(self._timers.keys())
+            for t in self._timers.values():
+                t.cancel()
+            self._timers.clear()
+        for game_name in pending:
+            self._do_backup(game_name)
+
 
 def main():
+    follow_game = "--follow-game" in sys.argv
+
     if not SAVEDGAMES_PATH.exists():
-        print("ERROR: savedgames folder not found: " + str(SAVEDGAMES_PATH))
+        log("ERROR: savedgames folder not found: " + str(SAVEDGAMES_PATH))
         sys.exit(1)
     acquire_lock()
-    print("Watching all games in: " + str(SAVEDGAMES_PATH))
-    print("Backups stored in:     <gamename>_backups\\ (one numbered folder per turn)")
-    print("Delay: " + str(BACKUP_DELAY) + "s after last order change.")
-    print("Press Ctrl+C to stop.\n")
+    log("Watching all games in: " + str(SAVEDGAMES_PATH))
+    log("Backups stored in:     <gamename>_backups\\ (one numbered folder per turn)")
+    log("Delay: " + str(BACKUP_DELAY) + "s after last order change.")
+    if follow_game:
+        log("Follow-game mode: will exit when " + GAME_EXE + " closes.")
+    else:
+        log("Press Ctrl+C to stop.")
 
     handler = SaveWatcher()
     observer = Observer()
     observer.schedule(handler, str(SAVEDGAMES_PATH), recursive=True)
     observer.start()
     try:
-        while True:
-            time.sleep(1)
+        if follow_game:
+            grace_end = time.time() + GAME_STARTUP_GRACE
+            while True:
+                time.sleep(GAME_POLL_SECONDS)
+                if time.time() < grace_end:
+                    continue
+                if not is_game_running():
+                    log(GAME_EXE + " no longer running. Shutting down watcher.")
+                    break
+        else:
+            while True:
+                time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping watcher.")
-        handler.cancel_all()
-        observer.stop()
+        log("Stopping watcher (Ctrl+C).")
+    handler.flush_all()
+    observer.stop()
     observer.join()
 
 
