@@ -76,10 +76,15 @@ def log(msg):
         pass
 
 
+# Without CREATE_NO_WINDOW, every tasklist call from pythonw flashes a console
+# window on screen.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
+
 def is_pid_running(pid):
     result = subprocess.run(
         ["tasklist", "/FI", "PID eq " + str(pid)],
-        capture_output=True, text=True
+        capture_output=True, text=True, creationflags=_NO_WINDOW
     )
     return str(pid) in result.stdout
 
@@ -87,7 +92,7 @@ def is_pid_running(pid):
 def is_game_running():
     result = subprocess.run(
         ["tasklist", "/FI", "IMAGENAME eq " + GAME_EXE],
-        capture_output=True, text=True
+        capture_output=True, text=True, creationflags=_NO_WINDOW
     )
     return GAME_EXE.lower() in result.stdout.lower()
 
