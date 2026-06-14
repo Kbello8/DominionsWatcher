@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # WHAT THE DOMINIONS SAVE FILES ACTUALLY ARE
 # -----------------------------------------------------------------------------
-# A game folder under \savedgames\<gamename>\ contains a few file types:
+# A game folder under savedgames/<gamename>/ contains a few file types:
 #
 #   .2h        Your ORDERS file ("two hands"). One per player. Holds the commands
 #              you've issued this turn (movements, spells, recruitment, etc.).
@@ -23,13 +23,13 @@
 #              part of the backup, but not used to trigger one.
 #
 # BACKUP STRUCTURE
-#   savedgames\
-#     <gamename>\                  <- live game (watched)
-#     <gamename>_backups\          <- backup container (ignored by watcher)
+#   savedgames/
+#     <gamename>/                  <- live game (watched)
+#     <gamename>_backups/          <- backup container (ignored by watcher)
 #       turn_index.json            <- maps trn-hash -> turn number (survives restarts)
-#       <gamename>_001\            <- turn 1 backup
-#       <gamename>_002\            <- turn 2 backup
-#       <gamename>_003\            <- turn 3 backup (latest orders)
+#       <gamename>_001/            <- turn 1 backup
+#       <gamename>_002/            <- turn 2 backup
+#       <gamename>_003/            <- turn 3 backup (latest orders)
 # -----------------------------------------------------------------------------
 import json
 import shutil
@@ -38,6 +38,7 @@ import os
 import sys
 import atexit
 import hashlib
+import platform
 import threading
 import subprocess
 import traceback
@@ -45,7 +46,22 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-SAVEDGAMES_PATH = Path(os.environ["APPDATA"]) / "Dominions6" / "savedgames"
+IS_WINDOWS = platform.system() == "Windows"
+IS_MACOS = platform.system() == "Darwin"
+
+def _get_savedgames_path():
+    """Return the Dominions 6 savedgames path for the current platform."""
+    if IS_WINDOWS:
+        return Path(os.environ["APPDATA"]) / "Dominions6" / "savedgames"
+    elif IS_MACOS:
+        return Path.home() / ".dominions6" / "savedgames"
+    else:
+        # Linux / other: XDG or ~/.local/share
+        xdg = os.environ.get("XDG_DATA_HOME", "")
+        base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+        return base / "Dominions6" / "savedgames"
+
+SAVEDGAMES_PATH = _get_savedgames_path()
 EXCLUDE_EXTENSIONS = {".d6m", ".map"}
 
 # Seconds to wait after the LAST detected change before backing up. Rapid saves
@@ -60,7 +76,12 @@ LOCK_FILE = SAVEDGAMES_PATH / "dom6_backup.lock"
 LOG_FILE = SAVEDGAMES_PATH / "dom6_backup.log"
 
 # --follow-game mode: poll for the game process and exit when it's gone.
-GAME_EXE = "Dominions6.exe"
+if IS_WINDOWS:
+    GAME_EXE = "Dominions6.exe"
+elif IS_MACOS:
+    GAME_EXE = "dom6_mac"
+else:
+    GAME_EXE = "Dominions6"
 GAME_POLL_SECONDS = 15
 GAME_STARTUP_GRACE = 60  # don't exit before the game has had time to launch
 
@@ -77,24 +98,54 @@ def log(msg):
 
 
 # Without CREATE_NO_WINDOW, every tasklist call from pythonw flashes a console
-# window on screen.
-_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+# window on screen. On non-Windows platforms this is unused.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if IS_WINDOWS else 0
+
+
+def _subprocess_kwargs():
+    """Return common subprocess.run kwargs, including CREATE_NO_WINDOW on Windows."""
+    kwargs = {"capture_output": True, "text": True}
+    if IS_WINDOWS:
+        kwargs["creationflags"] = _NO_WINDOW
+    return kwargs
 
 
 def is_pid_running(pid):
-    result = subprocess.run(
-        ["tasklist", "/FI", "PID eq " + str(pid)],
-        capture_output=True, text=True, creationflags=_NO_WINDOW
-    )
-    return str(pid) in result.stdout
+    if IS_WINDOWS:
+        result = subprocess.run(
+            ["tasklist", "/FI", "PID eq " + str(pid)],
+            **_subprocess_kwargs()
+        )
+        return str(pid) in result.stdout
+    else:
+        # POSIX: signal 0 checks existence without killing
+        try:
+            os.kill(pid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
 
 
 def is_game_running():
-    result = subprocess.run(
-        ["tasklist", "/FI", "IMAGENAME eq " + GAME_EXE],
-        capture_output=True, text=True, creationflags=_NO_WINDOW
-    )
-    return GAME_EXE.lower() in result.stdout.lower()
+    if IS_WINDOWS:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq " + GAME_EXE],
+            **_subprocess_kwargs()
+        )
+        return GAME_EXE.lower() in result.stdout.lower()
+    elif IS_MACOS:
+        result = subprocess.run(
+            ["pgrep", "-if", "dom6_mac"],
+            **_subprocess_kwargs()
+        )
+        return result.returncode == 0
+    else:
+        # Linux fallback
+        result = subprocess.run(
+            ["pgrep", "-f", GAME_EXE],
+            **_subprocess_kwargs()
+        )
+        return result.returncode == 0
 
 
 def acquire_lock():
