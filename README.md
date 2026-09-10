@@ -65,6 +65,19 @@ To check if backups are happening, open:
 ```
 
 
+## Excluding games from auto-backup
+
+`excluded_games.md`, next to `dom6_backup.py`, lists game names to skip. It is created automatically (empty, with instructions) the first time the watcher runs.
+
+Add a game by putting its exact folder name in quotes, one per line:
+```
+"TestGame"
+"SomeOtherGame"
+```
+
+Matching is exact and case-sensitive, and the file is re-read on every backup check, so you can edit it while the watcher is running.
+
+
 ## Stopping the watcher manually
 
 Run `dom6_kill.bat`. This kills all running watcher instances regardless of how they were started.
@@ -80,3 +93,4 @@ Run `dom6_kill.bat`. This kills all running watcher instances regardless of how 
 | `dom6_backup.py` | The watcher script (runs in the background) |
 | `dom6_kill.bat` | Emergency stop for the watcher |
 | `dom6_config.txt` | Your saved game path (created on first run) |
+| `excluded_games.md` | Games to skip from auto-backup (created on first run) |

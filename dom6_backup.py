@@ -32,6 +32,7 @@
 #       <gamename>_003\            <- turn 3 backup (latest orders)
 # -----------------------------------------------------------------------------
 import json
+import re
 import shutil
 import time
 import os
@@ -47,6 +48,31 @@ from watchdog.events import FileSystemEventHandler
 
 SAVEDGAMES_PATH = Path(os.environ["APPDATA"]) / "Dominions6" / "savedgames"
 EXCLUDE_EXTENSIONS = {".d6m", ".map"}
+
+# Game names listed here in "quotes" are skipped by the auto-backup.
+# Plain UTF-8 text file, no OS-specific line endings assumed -- read via
+# Path.read_text() which normalizes both \n and \r\n.
+SCRIPT_DIR = Path(__file__).resolve().parent
+EXCLUDE_LIST_FILE = SCRIPT_DIR / "excluded_games.md"
+
+
+def ensure_exclude_list_file():
+    if not EXCLUDE_LIST_FILE.exists():
+        EXCLUDE_LIST_FILE.write_text(
+            "# Excluded games\n"
+            "# List game names in \"quotes\", one or more per line.\n"
+            "# Matching games are skipped by the auto-backup.\n"
+            "# Example: \"TestGame\"\n",
+            encoding="utf-8",
+        )
+
+
+def get_excluded_games():
+    try:
+        text = EXCLUDE_LIST_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    return set(re.findall(r'"([^"]+)"', text))
 
 # Seconds to wait after the LAST detected change before backing up. Rapid saves
 # keep pushing this out, so a burst collapses into a single backup.
@@ -208,6 +234,10 @@ class SaveWatcher(FileSystemEventHandler):
         if not game_dir.is_dir():
             return
 
+        if game_name in get_excluded_games():
+            log("'" + game_name + "' is in excluded_games.md -- skipping backup.")
+            return
+
         fp = trn_fingerprint(game_dir)
         if fp is None:
             log("'" + game_name + "' no .trn found -- skipping.")
@@ -284,7 +314,9 @@ def main():
         log("ERROR: savedgames folder not found: " + str(SAVEDGAMES_PATH))
         sys.exit(1)
     acquire_lock()
+    ensure_exclude_list_file()
     log("Watching all games in: " + str(SAVEDGAMES_PATH))
+    log("Excluded games list:   " + str(EXCLUDE_LIST_FILE))
     log("Backups stored in:     <gamename>_backups\\ (one numbered folder per turn)")
     log("Delay: " + str(BACKUP_DELAY) + "s after last order change.")
     if follow_game:
