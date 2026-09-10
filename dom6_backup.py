@@ -69,10 +69,15 @@ def ensure_exclude_list_file():
 
 def get_excluded_games():
     try:
-        text = EXCLUDE_LIST_FILE.read_text(encoding="utf-8")
+        lines = EXCLUDE_LIST_FILE.read_text(encoding="utf-8").splitlines()
     except OSError:
         return set()
-    return set(re.findall(r'"([^"]+)"', text))
+    names = set()
+    for line in lines:
+        if line.lstrip().startswith("#"):
+            continue
+        names.update(re.findall(r'"([^"]+)"', line))
+    return names
 
 # Seconds to wait after the LAST detected change before backing up. Rapid saves
 # keep pushing this out, so a burst collapses into a single backup.
